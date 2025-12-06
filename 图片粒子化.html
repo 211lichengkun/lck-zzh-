@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>影院级粒子还原 - 最终版</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Microsoft YaHei', sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px; left: 20px; z-index: 10;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(8px);
+            padding: 20px;
+            border-radius: 16px;
+            border: 1px solid rgba(255,255,255,0.1);
+            color: white;
+            width: 280px;
+            transition: opacity 0.3s;
+        }
+
+        /* 隐藏UI按钮 */
+        #toggle-ui {
+            position: absolute; top: 10px; right: 10px;
+            cursor: pointer; opacity: 0.5;
+        }
+
+        h2 { margin: 0 0 5px 0; font-size: 18px; letter-spacing: 1px; }
+        .sub-text { font-size: 12px; color: #888; margin-bottom: 15px; }
+
+        .btn-upload {
+            background: linear-gradient(90deg, #ff8c00, #ff0055);
+            border: none; padding: 12px; width: 100%;
+            border-radius: 8px; color: white; font-weight: bold;
+            cursor: pointer; text-align: center; display: block;
+            box-shadow: 0 4px 15px rgba(255, 0, 85, 0.3);
+            transition: transform 0.2s;
+        }
+        .btn-upload:hover { transform: scale(1.02); }
+        input[type="file"] { display: none; }
+
+        .control-row { margin-top: 15px; }
+        label { display: flex; justify-content: space-between; font-size: 12px; color: #ccc; margin-bottom: 5px; }
+        input[type="range"] { width: 100%; accent-color: #ff0055; cursor: pointer; }
+
+        #loading {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: white; font-size: 14px; letter-spacing: 2px;
+            pointer-events: none; opacity: 0; transition: opacity 0.3s;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="toggle-ui" onclick="document.getElementById('ui-layer').style.opacity = '0.1'">✖</div>
+        <h2>✨ 唯美粒子重构</h2>
+        <p class="sub-text">专为夜景光束优化</p>
+
+        <label class="btn-upload" for="file-input">
+            📸 选择那张照片
+        </label>
+        <input id="file-input" type="file" accept="image/*">
+
+        <div class="control-row">
+            <label><span>粒子扩散 (爆开感)</span> <span id="val-disp">1.5</span></label>
+            <input type="range" id="disp-range" min="0" max="5" step="0.1" value="1.5">
+        </div>
+        <div class="control-row">
+            <label><span>光晕大小</span> <span id="val-size">2.0</span></label>
+            <input type="range" id="size-range" min="0.5" max="5" step="0.1" value="2.0">
+        </div>
+    </div>
+
+    <div id="loading">正在解构光影...</div>
+    <div id="canvas-container"></div>
+
+    <!-- 核心库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <!-- 核心着色器代码 (这是效果提升的关键) -->
+    <script id="vertexshader" type="x-shader/x-vertex">
+        attribute float size;
+        attribute vec3 customColor;
+        varying vec3 vColor;
+        varying float vAlpha;
+
+        uniform float uTime;
+        uniform float uPixelRatio;
+        uniform float uSizeMultiplier;
+        uniform float uDisplacement;
+
+        void main() {
+            vColor = customColor;
+
+            // 简单的波动动画
+            vec3 newPos = position;
+
+            // 让亮的地方浮动得更明显
+            float brightness = (vColor.r + vColor.g + vColor.b) / 3.0;
+            newPos.z += sin(uTime * 2.0 + position.x * 0.05) * 5.0 * brightness;
+
+            // 根据亮度决定Z轴凸起 (3D感)
+            newPos.z += brightness * 200.0 * uDisplacement;
+
+            vec4 mvPosition = modelViewMatrix * vec4(newPos, 1.0);
+
+            gl_Position = projectionMatrix * mvPosition;
+
+            // 粒子大小计算：越亮越大，且随距离衰减
+            float dynamicSize = size * uSizeMultiplier * (1.0 + brightness * 3.0);
+            gl_PointSize = dynamicSize * uPixelRatio * (300.0 / -mvPosition.z);
+
+            // 越暗越透明
+            vAlpha = 0.3 + brightness * 0.7;
+        }
+    </script>
+
+    <script id="fragmentshader" type="x-shader/x-fragment">
+        uniform vec3 color;
+        uniform sampler2D pointTexture;
+        varying vec3 vColor;
+        varying float vAlpha;
+
+        void main() {
+            // 这一步让粒子变成圆球光晕，而不是方块
+            vec4 texColor = texture2D(pointTexture, gl_PointCoord);
+            if (texColor.a < 0.1) discard;
+
+            // 颜色叠加加强
+            gl_FragColor = vec4(color * vColor, vAlpha * texColor.a);
+        }
+    </script>
+
+    <script>
+        let scene, camera, renderer, particleSystem, controls;
+        let uniforms;
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x050505, 0.001); // 黑色雾气增加深邃感
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 5000);
+            camera.position.set(0, 0, 600);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 优化性能
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.autoRotate = true;
+            controls.autoRotateSpeed = 0.5;
+
+            // 生成光晕贴图 (程序生成，不用加载外部图片)
+            const sprite = getSprite();
+
+            // 着色器参数
+            uniforms = {
+                uTime: { value: 0.0 },
+                uPixelRatio: { value: renderer.getPixelRatio() },
+                uSizeMultiplier: { value: 2.0 },
+                uDisplacement: { value: 1.5 },
+                color: { value: new THREE.Color(0xffffff) },
+                pointTexture: { value: sprite }
+            };
+
+            window.addEventListener('resize', onResize);
+            document.getElementById('file-input').addEventListener('change', handleUpload);
+
+            // 绑定滑块
+            document.getElementById('disp-range').addEventListener('input', (e) => {
+                uniforms.uDisplacement.value = parseFloat(e.target.value);
+                document.getElementById('val-disp').innerText = e.target.value;
+            });
+            document.getElementById('size-range').addEventListener('input', (e) => {
+                uniforms.uSizeMultiplier.value = parseFloat(e.target.value);
+                document.getElementById('val-size').innerText = e.target.value;
+            });
+
+            animate();
+        }
+
+        // 生成圆形光晕贴图
+        function getSprite() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(0.4, 'rgba(255,255,255,0.4)');
+            gradient.addColorStop(1, 'rgba(0,0,0,0)');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 64, 64);
+            const texture = new THREE.CanvasTexture(canvas);
+            return texture;
+        }
+
+        function handleUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const loaderDiv = document.getElementById('loading');
+            loaderDiv.style.opacity = 1;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = new Image();
+                img.onload = function() {
+                    createParticles(img);
+                    loaderDiv.style.opacity = 0;
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function createParticles(image) {
+            if (particleSystem) scene.remove(particleSystem);
+
+            // 1. 获取像素数据
+            const canvas = document.createElement('canvas');
+            // 适当缩小以提高性能，同时保持足够密度
+            const targetWidth = 600;
+            const scale = targetWidth / image.width;
+            const width = targetWidth;
+            const height = Math.floor(image.height * scale);
+
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(image, 0, 0, width, height);
+            const data = ctx.getImageData(0, 0, width, height).data;
+
+            // 2. 构建粒子数据
+            const positions = [];
+            const colors = [];
+            const sizes = [];
+
+            // 采样密度 (1 = 每个像素都采，效果最好但卡顿)
+            // 这里用随机抖动采样，效果更自然
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const i = (y * width + x) * 4;
+                    const r = data[i];
+                    const g = data[i + 1];
+                    const b = data[i + 2];
+                    const brightness = (r + g + b) / 765; // 0.0 - 1.0
+
+                    // 抛弃纯黑背景，只保留有光的部分，极大提升效果和性能
+                    if (brightness < 0.05) continue;
+
+                    // 坐标归一化并居中
+                    const px = x - width / 2;
+                    const py = -(y - height / 2); // 反转Y
+                    const pz = 0;
+
+                    positions.push(px, py, pz);
+
+                    // 颜色增强：让灯光更暖，冷色更冷
+                    colors.push(r/255, g/255, b/255);
+
+                    // 基础大小
+                    sizes.push(1.0);
+                }
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('customColor', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+            // 3. 使用 ShaderMaterial (高级材质)
+            const material = new THREE.ShaderMaterial({
+                uniforms: uniforms,
+                vertexShader: document.getElementById('vertexshader').textContent,
+                fragmentShader: document.getElementById('fragmentshader').textContent,
+                blending: THREE.AdditiveBlending, // 关键：加法混合让光叠加变亮
+                depthTest: false,
+                transparent: true
+            });
+
+            particleSystem = new THREE.Points(geometry, material);
+            scene.add(particleSystem);
+
+            // 相机自适应
+            camera.position.z = width * 1.2;
+        }
+
+        function onResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            uniforms.uPixelRatio.value = renderer.getPixelRatio();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = Date.now() * 0.001;
+            uniforms.uTime.value = time;
+
+            // 缓慢旋转场景
+            if (particleSystem) {
+                // particleSystem.rotation.y = Math.sin(time * 0.1) * 0.1;
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>

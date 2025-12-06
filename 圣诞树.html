@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>握拳变身圣诞树</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #020205; font-family: sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+
+        /* 摄像头小窗 - 增加状态反馈边框 */
+        #cam-preview {
+            position: absolute; bottom: 10px; right: 10px; z-index: 20;
+            width: 140px; height: 105px; border-radius: 12px;
+            border: 4px solid #555; /* 默认灰色 */
+            background: #000; transform: scaleX(-1);
+            opacity: 0; transition: opacity 0.5s, border-color 0.3s;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        }
+        #cam-preview.active { opacity: 1; border-color: #fff; } /* 激活状态 */
+        #cam-preview.fist-detected { border-color: #00ff00; box-shadow: 0 0 15px #00ff00; } /* 识别到握拳 */
+
+        /* 告白文字 */
+        #love-text {
+            position: absolute; top: 15%; left: 50%; transform: translateX(-50%);
+            z-index: 20; color: #ff69b4; font-size: 32px; font-weight: bold;
+            font-family: cursive, sans-serif; letter-spacing: 2px;
+            text-shadow: 0 0 10px #ff69b4, 0 0 20px #ff1493;
+            opacity: 0; transition: opacity 1s; pointer-events: none;
+            white-space: nowrap;
+        }
+
+        /* 状态提示 */
+        #status-bar {
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+            z-index: 50; color: rgba(255,255,255,0.9); font-size: 14px;
+            background: rgba(0,0,0,0.6); padding: 8px 20px; border-radius: 30px;
+            pointer-events: none; white-space: nowrap; border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        /* 按钮 */
+        #upload-btn-container {
+            position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
+            z-index: 20;
+        }
+        .btn-upload {
+            background: linear-gradient(45deg, #ff3366, #ff9933);
+            padding: 12px 30px; border-radius: 50px; color: white; font-weight: bold;
+            box-shadow: 0 0 15px rgba(255, 51, 102, 0.4); cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .btn-upload:active { transform: scale(0.95); }
+        input[type="file"] { display: none; }
+    </style>
+</head>
+<body>
+
+    <div id="love-text">lck ❤ zzh</div>
+    <div id="status-bar">等待上传图片...</div>
+
+    <!-- 摄像头预览 -->
+    <video id="cam-preview" playsinline autoplay muted></video>
+
+    <div id="upload-btn-container">
+        <label class="btn-upload" for="file-input">📸 上传照片</label>
+        <input id="file-input" type="file" accept="image/*">
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <!-- 库文件 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <!-- Shader -->
+    <script id="vertexshader" type="x-shader/x-vertex">
+        attribute float size;
+        attribute vec3 customColor;
+        attribute vec3 treePosition;
+        attribute vec3 treeColor;
+        varying vec3 vColor;
+        varying float vAlpha;
+        uniform float uTime;
+        uniform float uPixelRatio;
+        uniform float uMorphFactor;
+        void main() {
+            vec3 currentPos = mix(position, treePosition, uMorphFactor);
+            vColor = mix(customColor, treeColor, uMorphFactor);
+            if (uMorphFactor > 0.01) {
+                float angle = uTime * 0.3 * uMorphFactor;
+                float s = sin(angle);
+                float c = cos(angle);
+                float x = currentPos.x * c - currentPos.z * s;
+                float z = currentPos.x * s + currentPos.z * c;
+                currentPos.x = x; currentPos.z = z;
+                currentPos.y += sin(uTime * 2.0 + position.y * 0.05) * 5.0 * uMorphFactor;
+            }
+            vec4 mvPosition = modelViewMatrix * vec4(currentPos, 1.0);
+            gl_Position = projectionMatrix * mvPosition;
+            float baseSize = size * (1.0 + uMorphFactor * 0.6);
+            gl_PointSize = baseSize * uPixelRatio * (400.0 / -mvPosition.z);
+            vAlpha = 0.8 + 0.2 * sin(uTime * 5.0 + currentPos.x);
+        }
+    </script>
+    <script id="fragmentshader" type="x-shader/x-fragment">
+        uniform vec3 color;
+        uniform sampler2D pointTexture;
+        varying vec3 vColor;
+        varying float vAlpha;
+        void main() {
+            vec4 texColor = texture2D(pointTexture, gl_PointCoord);
+            if (texColor.a < 0.1) discard;
+            gl_FragColor = vec4(color * vColor, vAlpha * texColor.a);
+        }
+    </script>
+
+    <script>
+        let scene, camera, renderer, particleSystem, uniforms;
+        let targetMorphValue = 0;
+        let currentMorphValue = 0;
+        let isTouching = false;
+        let isFistDetected = false; // 握拳状态
+        const statusEl = document.getElementById('status-bar');
+        const camPreview = document.getElementById('cam-preview');
+
+        // 树参数
+        const TREE_HEIGHT = 600;
+        const TREE_RADIUS = 250;
+
+        function initThree() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x020205, 0.0008);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 5000);
+            camera.position.set(0, 0, 900);
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // 触控事件
+            window.addEventListener('mousedown', () => isTouching = true);
+            window.addEventListener('mouseup', () => isTouching = false);
+            window.addEventListener('touchstart', (e) => isTouching = true);
+            window.addEventListener('touchend', () => isTouching = false);
+            window.addEventListener('resize', onResize);
+
+            uniforms = {
+                uTime: { value: 0.0 },
+                uPixelRatio: { value: renderer.getPixelRatio() },
+                uMorphFactor: { value: 0.0 },
+                color: { value: new THREE.Color(0xffffff) },
+                pointTexture: { value: getSprite() }
+            };
+
+            document.getElementById('file-input').addEventListener('change', handleUpload);
+            animate();
+            setTimeout(initMediaPipe, 1000);
+        }
+
+        function createParticles(image) {
+            if (particleSystem) scene.remove(particleSystem);
+            const canvas = document.createElement('canvas');
+            const targetWidth = 350;
+            const scale = targetWidth / image.width;
+            const width = targetWidth;
+            const height = Math.floor(image.height * scale);
+            canvas.width = width; canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(image, 0, 0, width, height);
+            const data = ctx.getImageData(0, 0, width, height).data;
+            const count = width * height;
+
+            const positions=[], treePositions=[], colors=[], treeColors=[], sizes=[];
+            const validIndices = [];
+            for(let i=0; i<count; i++) {
+                if ((data[i*4] + data[i*4+1] + data[i*4+2])/3 > 10) validIndices.push(i);
+            }
+            const totalPoints = validIndices.length;
+            statusEl.innerText = `图片已加载，请握紧拳头 ✊`;
+
+            for (let i = 0; i < totalPoints; i++) {
+                const idx = validIndices[i];
+                const x = (idx % width);
+                const y = Math.floor(idx / width);
+                positions.push(x - width/2, -(y - height/2), 0);
+                colors.push(data[idx*4]/255, data[idx*4+1]/255, data[idx*4+2]/255);
+                sizes.push(1.0 + Math.random() * 1.5);
+
+                const progress = i / totalPoints;
+                const angle = progress * 40.0;
+                const radius = TREE_RADIUS * (1.0 - progress);
+                const randomR = radius + (Math.random() - 0.5) * 60;
+                treePositions.push(Math.cos(angle)*randomR, (progress-0.5)*TREE_HEIGHT, Math.sin(angle)*randomR);
+
+                const rand = Math.random();
+                if (progress > 0.98) treeColors.push(1, 1, 1);
+                else if (rand > 0.9) {
+                    const type = Math.random();
+                    if(type<0.3) treeColors.push(1,0.1,0.2);
+                    else if(type<0.6) treeColors.push(1,0.5,0.8);
+                    else treeColors.push(0.2,0.6,1);
+                } else if (rand > 0.75) treeColors.push(1, 0.8, 0.3);
+                else treeColors.push(0.1, 0.5 + progress*0.5, 0.3);
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('customColor', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.setAttribute('treePosition', new THREE.Float32BufferAttribute(treePositions, 3));
+            geometry.setAttribute('treeColor', new THREE.Float32BufferAttribute(treeColors, 3));
+            geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+            const material = new THREE.ShaderMaterial({
+                uniforms: uniforms,
+                vertexShader: document.getElementById('vertexshader').textContent,
+                fragmentShader: document.getElementById('fragmentshader').textContent,
+                blending: THREE.AdditiveBlending,
+                depthTest: false,
+                transparent: true
+            });
+            particleSystem = new THREE.Points(geometry, material);
+            scene.add(particleSystem);
+        }
+
+        // --- 核心：握拳识别逻辑 ---
+        async function initMediaPipe() {
+            try {
+                if(!window.Hands) { statusEl.innerText += " (组件加载失败)"; return; }
+                const videoElement = document.getElementById('cam-preview');
+                const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+
+                hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.5 });
+
+                hands.onResults((results) => {
+                    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                        const landmarks = results.multiHandLandmarks[0];
+
+                        // 检测是否握拳
+                        // 逻辑：检查四个指尖(8,12,16,20)到手腕(0)的距离
+                        // 如果指尖到手腕的距离 < 指关节(PIP, 6,10,14,18)到手腕的距离，说明手指弯曲
+                        const fingers = [8, 12, 16, 20]; // 食指、中指、无名指、小指
+                        const pips = [6, 10, 14, 18];    // 对应的第二关节
+                        let foldedCount = 0;
+
+                        for (let i = 0; i < 4; i++) {
+                            const dTip = getDistance(landmarks[fingers[i]], landmarks[0]);
+                            const dPip = getDistance(landmarks[pips[i]], landmarks[0]);
+                            // 如果指尖距离比关节距离更近，或者非常接近，判定为弯曲
+                            if (dTip < dPip * 1.1) foldedCount++;
+                        }
+
+                        // 如果3根以上手指弯曲，视为握拳
+                        if (foldedCount >= 3) {
+                            isFistDetected = true;
+                            camPreview.classList.add('fist-detected');
+                        } else {
+                            isFistDetected = false;
+                            camPreview.classList.remove('fist-detected');
+                        }
+                    } else {
+                        isFistDetected = false;
+                        camPreview.classList.remove('fist-detected');
+                    }
+                });
+
+                const cameraUtils = new Camera(videoElement, {
+                    onFrame: async () => await hands.send({image: videoElement}),
+                    width: 320, height: 240
+                });
+
+                await cameraUtils.start();
+                camPreview.classList.add('active');
+                statusEl.innerText = "摄像头就绪！请对着镜头 ✊ 握拳";
+            } catch(e) {
+                console.warn(e);
+                statusEl.innerText = "摄像头不可用，请长按屏幕代替";
+            }
+        }
+
+        function getDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
+        }
+
+        function getSprite() {
+            const c = document.createElement('canvas'); c.width=32; c.height=32;
+            const ctx = c.getContext('2d');
+            const g = ctx.createRadialGradient(16,16,0,16,16,16);
+            g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(1,'rgba(0,0,0,0)');
+            ctx.fillStyle = g; ctx.fillRect(0,0,32,32);
+            return new THREE.CanvasTexture(c);
+        }
+
+        function handleUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            statusEl.innerText = "正在解析...";
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const img = new Image();
+                img.onload = () => createParticles(img);
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function onResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            uniforms.uPixelRatio.value = renderer.getPixelRatio();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            // 触发条件：握拳 或 长按
+            const active = isFistDetected || isTouching;
+            targetMorphValue = active ? 1.0 : 0.0;
+            currentMorphValue += (targetMorphValue - currentMorphValue) * 0.08; // 稍微调快响应速度
+
+            uniforms.uMorphFactor.value = currentMorphValue;
+            uniforms.uTime.value = Date.now() * 0.001;
+
+            const textEl = document.getElementById('love-text');
+            if(currentMorphValue > 0.6) {
+                textEl.style.opacity = 1; textEl.style.top = '15%';
+            } else {
+                textEl.style.opacity = 0; textEl.style.top = '20%';
+            }
+            renderer.render(scene, camera);
+        }
+        initThree();
+    </script>
+</body>
+</html>

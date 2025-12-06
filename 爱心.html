@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>AI 粒子圣诞树 - 告白版</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎄</text></svg>">
+
+    <style>
+        :root {
+            --primary-color: #ff3366;
+            --glass-bg: rgba(20, 20, 30, 0.6);
+            --glass-border: rgba(255, 255, 255, 0.1);
+        }
+
+        body { margin: 0; overflow: hidden; background-color: #020205; font-family: 'Segoe UI', sans-serif; }
+
+        #video-container { display: none; } /* 隐藏原始视频流 */
+
+        /* 摄像头小窗 (右上角) */
+        #cam-preview {
+            position: absolute; bottom: 20px; right: 20px; z-index: 50;
+            width: 120px; height: 90px; border-radius: 12px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            background: #000; transform: scaleX(-1);
+            transition: border-color 0.3s, box-shadow 0.3s;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+        }
+        #cam-preview.active { border-color: #fff; }
+        #cam-preview.fist { border-color: #00ff7f; box-shadow: 0 0 15px #00ff7f; }
+
+        /* 左侧控制面板 (玻璃拟态) */
+        #ui-panel {
+            position: absolute; top: 20px; left: 20px; width: 280px;
+            padding: 20px; background: var(--glass-bg);
+            backdrop-filter: blur(12px); border: 1px solid var(--glass-border);
+            border-radius: 16px; color: white; z-index: 100;
+            transition: transform 0.3s ease, opacity 0.3s ease;
+        }
+        #ui-panel.hidden { transform: translateX(-120%); opacity: 0; }
+
+        h1 { font-size: 18px; margin: 0 0 15px 0; display: flex; align-items: center; gap: 10px; }
+        .status-dot { width: 10px; height: 10px; background: #555; border-radius: 50%; transition: all 0.3s; }
+        .status-dot.ready { background: #00bfff; box-shadow: 0 0 8px #00bfff; }
+        .status-dot.active { background: #00ff7f; box-shadow: 0 0 12px #00ff7f; }
+
+        p { font-size: 13px; color: #ccc; line-height: 1.5; margin: 5px 0; }
+        .highlight { color: #00ff7f; font-weight: bold; }
+
+        /* 告白文字 */
+        #love-text {
+            position: absolute; top: 15%; left: 50%; transform: translateX(-50%);
+            z-index: 20; color: #ff69b4; font-size: 32px; font-weight: bold;
+            font-family: 'Brush Script MT', cursive, serif; letter-spacing: 2px;
+            text-shadow: 0 0 10px #ff69b4, 0 0 20px #ff1493;
+            opacity: 0; transition: opacity 1.5s ease; pointer-events: none;
+            white-space: nowrap;
+        }
+
+        /* 顶部控制栏 */
+        #top-controls { position: absolute; top: 20px; right: 20px; z-index: 100; display: flex; gap: 10px; }
+        .control-btn {
+            background: var(--glass-bg); border: 1px solid var(--glass-border);
+            color: white; width: 40px; height: 40px; border-radius: 50%;
+            cursor: pointer; display: flex; align-items: center; justify-content: center;
+            backdrop-filter: blur(5px); font-size: 18px; transition: 0.2s;
+        }
+        .control-btn:hover { background: rgba(255,255,255,0.2); }
+
+        /* 上传按钮 */
+        .upload-wrapper { margin-top: 15px; text-align: center; }
+        .btn-upload {
+            background: linear-gradient(90deg, #ff3366, #ff9933);
+            border: none; padding: 10px 0; width: 100%; border-radius: 8px;
+            color: white; font-weight: bold; cursor: pointer; transition: transform 0.2s;
+        }
+        .btn-upload:active { transform: scale(0.98); }
+        input[type="file"] { display: none; }
+
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            color: white; pointer-events: none; text-shadow: 0 0 10px #ff3366;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">正在初始化视觉模型...</div>
+    <div id="love-text">lck ❤ zzh</div>
+
+    <!-- 顶部按钮 -->
+    <div id="top-controls">
+        <button id="toggle-ui" class="control-btn" title="隐藏面板">👁️</button>
+        <button id="fullscreen-btn" class="control-btn" title="全屏">⛶</button>
+    </div>
+
+    <!-- 左侧面板 -->
+    <div id="ui-panel">
+        <h1><div class="status-dot" id="status-dot"></div> 魔法控制台</h1>
+        <p>1. 上传一张照片</p>
+        <p>2. 对着镜头 <span class="highlight">✊ 握拳</span> 变身</p>
+        <p>3. <span class="highlight">🖐 张手</span> 变回照片</p>
+        <p style="font-size:12px; margin-top:10px; color:#888;">*如果摄像头无法使用，可长按屏幕互动</p>
+
+        <div class="upload-wrapper">
+            <label class="btn-upload" for="file-input">📂 选择照片</label>
+            <input id="file-input" type="file" accept="image/*">
+        </div>
+    </div>
+
+    <!-- 摄像头画面 -->
+    <video id="cam-preview" class="input_video" playsinline autoplay muted></video>
+
+    <!-- 3D 容器 -->
+    <div id="canvas-container"></div>
+
+    <!-- 核心库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <!-- Shader: 粒子变形与着色 -->
+    <script id="vertexshader" type="x-shader/x-vertex">
+        attribute float size;
+        attribute vec3 customColor;
+        attribute vec3 treePosition;
+        attribute vec3 treeColor;
+
+        varying vec3 vColor;
+        varying float vAlpha;
+
+        uniform float uTime;
+        uniform float uPixelRatio;
+        uniform float uMorphFactor; // 0=照片, 1=树
+
+        void main() {
+            // 位置混合
+            vec3 currentPos = mix(position, treePosition, uMorphFactor);
+            // 颜色混合
+            vColor = mix(customColor, treeColor, uMorphFactor);
+
+            // 当变身成树(uMorphFactor > 0)时的特效
+            if (uMorphFactor > 0.01) {
+                // 1. 螺旋上升动画
+                float angle = uTime * 0.2 * uMorphFactor;
+                float s = sin(angle);
+                float c = cos(angle);
+                // 绕Y轴旋转
+                float x = currentPos.x * c - currentPos.z * s;
+                float z = currentPos.x * s + currentPos.z * c;
+                currentPos.x = x;
+                currentPos.z = z;
+
+                // 2. 呼吸浮动
+                currentPos.y += sin(uTime * 2.0 + position.y * 0.05) * 5.0 * uMorphFactor;
+            }
+
+            vec4 mvPosition = modelViewMatrix * vec4(currentPos, 1.0);
+            gl_Position = projectionMatrix * mvPosition;
+
+            // 粒子大小随距离衰减，变成树时稍微变大
+            float baseSize = size * (1.0 + uMorphFactor * 0.8);
+            gl_PointSize = baseSize * uPixelRatio * (400.0 / -mvPosition.z);
+
+            // 闪烁Alpha
+            vAlpha = 0.8 + 0.2 * sin(uTime * 4.0 + currentPos.x);
+        }
+    </script>
+
+    <script id="fragmentshader" type="x-shader/x-fragment">
+        uniform vec3 color;
+        uniform sampler2D pointTexture;
+        varying vec3 vColor;
+        varying float vAlpha;
+
+        void main() {
+            vec4 texColor = texture2D(pointTexture, gl_PointCoord);
+            if (texColor.a < 0.1) discard;
+            // 颜色叠加模式，让光点更亮
+            gl_FragColor = vec4(color * vColor, vAlpha * texColor.a);
+        }
+    </script>
+
+    <script>
+        // --- 全局变量 ---
+        let scene, camera, renderer, particleSystem, uniforms;
+        let targetMorphValue = 0; // 目标状态：0=照片，1=树
+        let currentMorphValue = 0;
+
+        let isTouching = false; // 触摸/鼠标状态
+        let isFist = false;     // 握拳状态
+
+        const TREE_HEIGHT = 600;
+        const TREE_RADIUS = 250;
+
+        // --- 初始化 Three.js ---
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x020205, 0.0008); // 深邃背景雾
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 5000);
+            camera.position.set(0, 0, 900);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            // 交互事件 (作为摄像头的备选)
+            window.addEventListener('mousedown', () => isTouching = true);
+            window.addEventListener('mouseup', () => isTouching = false);
+            window.addEventListener('touchstart', (e) => isTouching = true);
+            window.addEventListener('touchend', () => isTouching = false);
+            window.addEventListener('resize', onResize);
+
+            // 材质贴图
+            const sprite = getSprite();
+
+            uniforms = {
+                uTime: { value: 0.0 },
+                uPixelRatio: { value: renderer.getPixelRatio() },
+                uMorphFactor: { value: 0.0 },
+                color: { value: new THREE.Color(0xffffff) },
+                pointTexture: { value: sprite }
+            };
+
+            animate();
+
+            // 延迟启动摄像头，避免卡顿
+            setTimeout(initMediaPipe, 800);
+        }
+
+        // --- 核心：创建粒子系统 ---
+        function createParticles(image) {
+            if (particleSystem) scene.remove(particleSystem);
+
+            const canvas = document.createElement('canvas');
+            const targetWidth = 350; // 限制粒子数量保证流畅
+            const scale = targetWidth / image.width;
+            const width = targetWidth;
+            const height = Math.floor(image.height * scale);
+
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(image, 0, 0, width, height);
+            const data = ctx.getImageData(0, 0, width, height).data;
+
+            const positions = [], treePositions = [], colors = [], treeColors = [], sizes = [];
+
+            // 筛选有效像素 (去除纯黑背景)
+            const validIndices = [];
+            for(let i=0; i<width*height; i++) {
+                if ((data[i*4] + data[i*4+1] + data[i*4+2])/3 > 10) validIndices.push(i);
+            }
+            const totalPoints = validIndices.length;
+
+            for (let i = 0; i < totalPoints; i++) {
+                const idx = validIndices[i];
+                const x = (idx % width);
+                const y = Math.floor(idx / width);
+
+                // 1. 照片坐标 (居中)
+                positions.push(x - width/2, -(y - height/2), 0);
+                colors.push(data[idx*4]/255, data[idx*4+1]/255, data[idx*4+2]/255);
+                sizes.push(1.0 + Math.random() * 1.5);
+
+                // 2. 圣诞树坐标 (圆锥螺旋)
+                const progress = i / totalPoints;
+                const angle = progress * 40.0; // 螺旋圈数
+                const radius = TREE_RADIUS * (1.0 - progress);
+                const randomR = radius + (Math.random() - 0.5) * 50; // 随机松散度
+
+                treePositions.push(Math.cos(angle)*randomR, (progress - 0.5)*TREE_HEIGHT, Math.sin(angle)*randomR);
+
+                // 3. 圣诞树颜色 (多彩 + 金色 + 顶星)
+                const rand = Math.random();
+                if (progress > 0.98) treeColors.push(1.0, 1.0, 1.0); // 顶星
+                else if (rand > 0.9) {
+                    // 彩色装饰球
+                    const t = Math.random();
+                    if(t<0.25) treeColors.push(1,0.1,0.2); // 红
+                    else if(t<0.5) treeColors.push(1,0.4,0.7); // 粉
+                    else if(t<0.75) treeColors.push(0.7,0.2,1.0); // 紫
+                    else treeColors.push(0.1,0.5,1.0); // 蓝
+                } else if (rand > 0.75) {
+                    treeColors.push(1.0, 0.85, 0.4); // 金色
+                } else {
+                    // 渐变绿
+                    treeColors.push(0.1, 0.5 + progress*0.5, 0.3);
+                }
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('customColor', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.setAttribute('treePosition', new THREE.Float32BufferAttribute(treePositions, 3));
+            geometry.setAttribute('treeColor', new THREE.Float32BufferAttribute(treeColors, 3));
+            geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+            const material = new THREE.ShaderMaterial({
+                uniforms: uniforms,
+                vertexShader: document.getElementById('vertexshader').textContent,
+                fragmentShader: document.getElementById('fragmentshader').textContent,
+                blending: THREE.AdditiveBlending,
+                depthTest: false,
+                transparent: true
+            });
+
+            particleSystem = new THREE.Points(geometry, material);
+            scene.add(particleSystem);
+
+            document.getElementById('status-dot').className = 'status-dot ready';
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        // --- 核心：MediaPipe 手势识别 (参考你的代码逻辑) ---
+        async function initMediaPipe() {
+            const videoElement = document.getElementById('cam-preview');
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.6,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults(onHandResults);
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => await hands.send({image: videoElement}),
+                width: 320, height: 240
+            });
+
+            try {
+                await cameraUtils.start();
+            } catch(e) {
+                console.log("摄像头启动失败，切换为仅触控模式");
+                document.getElementById('status-dot').style.backgroundColor = 'red';
+            }
+        }
+
+        function onHandResults(results) {
+            const preview = document.getElementById('cam-preview');
+            const dot = document.getElementById('status-dot');
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                const wrist = landmarks[0];
+
+                // 1. 伸直检测算法 (参考代码的逻辑)
+                function isExtended(tipIdx, pipIdx) {
+                    const tip = landmarks[tipIdx];
+                    const pip = landmarks[pipIdx];
+                    // 计算指尖到手腕 vs 关节到手腕的距离
+                    const dTip = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
+                    const dPip = Math.hypot(pip.x - wrist.x, pip.y - wrist.y);
+                    return dTip > dPip * 1.1; // 阈值1.1
+                }
+
+                // 检测五指状态
+                // const thumbUp = isExtended(4, 2); // 拇指有时候判定比较难，可以忽略
+                const indexUp = isExtended(8, 6);
+                const middleUp = isExtended(12, 10);
+                const ringUp = isExtended(16, 14);
+                const pinkyUp = isExtended(20, 18);
+
+                // 逻辑：如果食指、中指、无名指、小指 都没有伸直 -> 握拳
+                if (!indexUp && !middleUp && !ringUp && !pinkyUp) {
+                    isFist = true;
+                    preview.classList.add('fist');
+                    dot.className = 'status-dot active';
+                } else {
+                    isFist = false;
+                    preview.classList.remove('fist');
+                    preview.classList.add('active');
+                    dot.className = 'status-dot ready';
+                }
+            } else {
+                // 没检测到手
+                isFist = false;
+                preview.classList.remove('fist');
+                preview.classList.remove('active');
+            }
+        }
+
+        // --- 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 1. 慢速自旋 (参考代码的要求)
+            if (particleSystem) {
+                particleSystem.rotation.y += 0.001;
+            }
+
+            // 2. 状态切换：握拳 或 长按 -> 变身圣诞树
+            const active = isFist || isTouching;
+            targetMorphValue = active ? 1.0 : 0.0;
+
+            // 3. 缓动动画
+            currentMorphValue += (targetMorphValue - currentMorphValue) * 0.05;
+            uniforms.uMorphFactor.value = currentMorphValue;
+            uniforms.uTime.value = Date.now() * 0.001;
+
+            // 4. 文字显隐控制
+            const textEl = document.getElementById('love-text');
+            if (currentMorphValue > 0.6) {
+                textEl.style.opacity = 1;
+                textEl.style.top = '15%';
+            } else {
+                textEl.style.opacity = 0;
+                textEl.style.top = '20%';
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- UI 辅助功能 ---
+        function getSprite() {
+            const c = document.createElement('canvas'); c.width=32; c.height=32;
+            const ctx = c.getContext('2d');
+            const g = ctx.createRadialGradient(16,16,0,16,16,16);
+            g.addColorStop(0,'rgba(255,255,255,1)');
+            g.addColorStop(1,'rgba(0,0,0,0)');
+            ctx.fillStyle = g; ctx.fillRect(0,0,32,32);
+            return new THREE.CanvasTexture(c);
+        }
+
+        document.getElementById('file-input').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const img = new Image();
+                img.onload = () => createParticles(img);
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        function onResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            uniforms.uPixelRatio.value = renderer.getPixelRatio();
+        }
+
+        // 全屏按钮
+        document.getElementById('fullscreen-btn').addEventListener('click', () => {
+            if (!document.fullscreenElement) document.body.requestFullscreen();
+            else document.exitFullscreen();
+        });
+
+        // 隐藏UI按钮
+        const uiPanel = document.getElementById('ui-panel');
+        document.getElementById('toggle-ui').addEventListener('click', () => {
+            uiPanel.classList.toggle('hidden');
+        });
+
+        initThree();
+
+    </script>
+</body>
+</html>
